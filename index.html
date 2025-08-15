@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>EEPROM</title>
+    <style>
+        body {
+            margin: 0;
+        }
+
+        .console {
+            flex: 1;
+            width: 100%;
+            height: 100%;
+            background-color: black;
+            color: white;
+            font-family: monospace;
+            font-size: 12px;
+            padding: 10px;
+            overflow: auto;
+            border: 1px solid white;
+        }
+    </style>
+</head>
+<body>
+<script type="application/javascript">
+    let wakeLock = null;
+    let port;
+    let streamReaders = [
+        (value) => {
+            document.getElementById('output').innerText += value;
+        }
+    ];
+    let readerReleaseLock;
+
+    async function openPort() {
+        if ("serial" in navigator) {
+            // The Web Serial API is supported.
+            port = await navigator.serial.requestPort();
+            const {usbProductId, usbVendorId} = port.getInfo();
+            console.log(`USB Product ID: ${usbProductId}`);
+            console.log(`USB Vendor ID: ${usbVendorId}`);
+            await port.open({baudRate: 9600});
+            console.log("Port opened.");
+            const textDecoder = new TextDecoderStream();
+            const readableStreamClosed = port.readable.pipeTo(textDecoder.writable);
+            const reader = textDecoder.readable.getReader();
+            readerReleaseLock = () => reader.releaseLock();
+            while (true) {
+                const {value, done} = await reader.read();
+                if (done) {
+                    // Allow the serial port to be closed later.
+                    reader.releaseLock();
+                    break;
+                }
+                for (let i = 0; i < streamReaders.length; i++) {
+                    streamReaders[i](value);
+                }
+            }
+        } else {
+            alert("Web Serial API is not supported.");
+        }
+    }
+
+    async function closePort() {
+        if (port) {
+            !!readerReleaseLock && readerReleaseLock();
+            await port.close();
+            console.log("Port closed.");
+            port = null;
+            readerReleaseLock = null;
+        }
+    }
+
+    let data = null;
+
+    function toHex(buffer) {
+        return Array.prototype.map.call(buffer, x => ('00' + x.toString(16)).slice(-2)).join('');
+    }
+
+    function printData() {
+        if (data) {
+            document.getElementById('dataConsole').innerHTML = toHex(data).match(/.{1,4}/g).join(' ').match(/.{1,40}/g).join('<br/>');
+        }
+    }
+
+    async function openFile(e) {
+        const file = e.target.files[0];
+        if (!file) {
+            return;
+        }
+        var reader = new FileReader();
+        reader.onload = function (e) {
+            const contents = e.target.result;
+            data = new Uint8Array(contents);
+            printData();
+        };
+        reader.readAsArrayBuffer(file);
+    }
+
+    async function saveFile() {
+        const a = document.createElement("a");
+        document.body.appendChild(a);
+        a.style = "display: none";
+        const blob = new Blob([data], {type: "octet/stream"});
+        const url = window.URL.createObjectURL(blob);
+        a.href = url;
+        a.download = name;
+        a.click();
+        window.URL.revokeObjectURL(url);
+    }
+
+    function clearOutput() {
+        document.getElementById('output').innerHTML = "";
+    }
+
+    function clearDataConsole() {
+        document.getElementById('dataConsole').innerHTML = "";
+    }
+
+    async function send(str) {
+        console.log("SEND: [" + str + "]");
+        if (port) {
+            const writer = port.writable.getWriter();
+            const encoder = new TextEncoder();
+            const uint8Array = encoder.encode(str);
+            await writer.write(uint8Array);
+            writer.releaseLock();
+        } else {
+            console.error("PORT is not open");
+        }
+    }
+
+    async function readFull() {
+        let tmp = "";
+        clearDataConsole();
+        streamReaders.push((value) => {
+            const asd = value.split('\n');
+            tmp += asd[0];
+            data = Uint8Array.from(tmp.match(/.{1,2}/g).map((byte) => parseInt(byte, 16)));
+            printData();
+            if (asd.length > 1) {
+                streamReaders.splice(streamReaders.indexOf(this), 1);
+            }
+        });
+        await send("READ 000 2048\n");
+    }
+
+    async function read20() {
+        let tmp = "";
+        clearDataConsole();
+        streamReaders.push((value) => {
+            const asd = value.split('\n');
+            tmp += asd[0];
+            data = Uint8Array.from(tmp.match(/.{1,2}/g).map((byte) => parseInt(byte, 16)));
+            printData();
+            if (asd.length > 1) {
+                streamReaders.splice(streamReaders.indexOf(this), 1);
+            }
+        });
+        await send("READ 000 20\n");
+    }
+
+
+    async function deleteAll() {
+        await send("CLEAR\n");
+    }
+
+    async function writeAll() {
+        let lastByte = -1;
+        const reader = (value) => {
+            const bytes = value.match(/.{1,2}/g).map((byte) => parseInt(byte, 16));
+            if (bytes.length > 1) {
+                console.error("?????", bytes);
+            }
+            lastByte = bytes[0];
+        };
+        streamReaders.push(reader);
+
+        const length = data.length;
+        await send("WRITE 000 " + length + "\n");
+        for (let i = 0; i < length; i++) {
+            lastByte = -1;
+            await send(toHex([data[i]]));
+            while (lastByte !== data[i]) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+        }
+        console.log("REMOVE READER");
+        streamReaders.splice(streamReaders.indexOf(reader), 1);
+    }
+
+    async function toggleLock() {
+        if (wakeLock) {
+            await wakeLock.release();
+            wakeLock = null;
+            console.log('Wake UnLock successful');
+            document.getElementById('screenLock').innerText = "LOCK SCREEN";
+        } else {
+            wakeLock = await navigator.wakeLock.request('screen');
+            console.log('Wake Lock successful');
+            document.getElementById('screenLock').innerText = "UNLOCK SCREEN";
+        }
+    }
+
+    window.onload = function () {
+        document.getElementById('file-input')
+            .addEventListener('change', openFile, false);
+    }
+</script>
+<div style="display: flex; flex-direction: column; height: 100vh;">
+    <div>
+        <button onclick="readFull();">READ ALL</button>
+        <button onclick="read20();">READ 20</button>
+        <button onclick="saveFile();">SAVE</button>
+        <input type="file" id="file-input" accept=".hex"/>
+        <button onclick="writeAll();">WRITE ALL</button>
+        <button onclick="openPort()">OPEN PORT</button>
+        <button onclick="closePort()">CLOSE CLOSE</button>
+        <button onclick="clearOutput()">CLEAR CONSOLE</button>
+        <button onclick="deleteAll()">CLEAR EEPROM</button>
+        <button onclick="toggleLock()" id="screenLock">LOCK SCREEN</button>
+    </div>
+    <pre class="console" id="dataConsole"></pre>
+    <pre class="console" id="output"></pre>
+</div>
+</body>
+</html>
